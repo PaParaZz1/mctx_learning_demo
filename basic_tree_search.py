@@ -195,7 +195,7 @@ def get_agent_environment_interaction_loop_function(env, V_func, pi_func, recurr
             S["opt_t"]+=1
 
             # Update target params after a particular number of parameter updates
-            S["V_target_params"] = jx.tree_multimap(lambda x,y: jnp.where(S["opt_t"]%config.target_update_frequency==0,x,y),get_V_params(S["V_opt_state"]), S["V_target_params"])
+            S["V_target_params"] = jx.tree_util.tree_map(lambda x,y: jnp.where(S["opt_t"]%config.target_update_frequency==0,x,y),get_V_params(S["V_opt_state"]), S["V_target_params"])
 
             # always take action recommended by tree search
             actions = policy_output.action
@@ -206,7 +206,7 @@ def get_agent_environment_interaction_loop_function(env, V_func, pi_func, recurr
             # reset environment if terminated
             S["key"], subkey = jx.random.split(S["key"])
             subkeys = jx.random.split(subkey, num=config.batch_size)
-            S["env_states"] = jx.tree_multimap(lambda x,y: jnp.where(jnp.reshape(terminal,[terminal.shape[0]]+[1]*(len(x.shape)-1)), x,y), batch_reset(subkeys), S["env_states"])
+            S["env_states"] = jx.tree_util.tree_map(lambda x,y: jnp.where(jnp.reshape(terminal,[terminal.shape[0]]+[1]*(len(x.shape)-1)), x,y), batch_reset(subkeys), S["env_states"])
 
             # update statistics for computing average return
             S["episode_return"] += reward
@@ -222,52 +222,54 @@ def get_agent_environment_interaction_loop_function(env, V_func, pi_func, recurr
     return agent_environment_interaction_loop_function
 
 
-opt_t = 0
-time_step = 0
-avg_return = jnp.zeros(config.batch_size)
-episode_return = jnp.zeros(config.batch_size)
-num_episodes = jnp.zeros(config.batch_size)
+if __name__ == "__main__":
+    print(jx.__version__, jx.local_devices())
+    opt_t = 0
+    time_step = 0
+    avg_return = jnp.zeros(config.batch_size)
+    episode_return = jnp.zeros(config.batch_size)
+    num_episodes = jnp.zeros(config.batch_size)
 
-env = Environment(**env_config)
-num_actions = env.num_actions()
+    env = Environment(**env_config)
+    num_actions = env.num_actions()
 
-key, subkey = jx.random.split(key)
-env_states, V_func, pi_func, V_opt_state, pi_opt_state, V_opt_update, pi_opt_update, get_V_params, V_target_params, get_pi_params = get_init_fn(env)(subkey)
+    key, subkey = jx.random.split(key)
+    env_states, V_func, pi_func, V_opt_state, pi_opt_state, V_opt_update, pi_opt_update, get_V_params, V_target_params, get_pi_params = get_init_fn(env)(subkey)
 
-recurrent_fn = get_recurrent_fn(env, V_func, pi_func)
+    recurrent_fn = get_recurrent_fn(env, V_func, pi_func)
 
-agent_environment_interaction_loop_function = jit(get_agent_environment_interaction_loop_function(env, V_func, pi_func, recurrent_fn, V_opt_update, pi_opt_update, get_V_params, get_pi_params, num_actions, config.eval_frequency))
+    agent_environment_interaction_loop_function = jit(get_agent_environment_interaction_loop_function(env, V_func, pi_func, recurrent_fn, V_opt_update, pi_opt_update, get_V_params, get_pi_params, num_actions, config.eval_frequency))
 
 # run_state contains all information to be maintained and updated in agent_environment_interaction_loop
-run_state_names = ["env_states", "V_opt_state", "V_target_params", "pi_opt_state", "opt_t", "avg_return", "episode_return", "num_episodes", "key"]
-var_dict = locals()
-run_state = {name:var_dict[name] for name in run_state_names}
+    run_state_names = ["env_states", "V_opt_state", "V_target_params", "pi_opt_state", "opt_t", "avg_return", "episode_return", "num_episodes", "key"]
+    var_dict = locals()
+    run_state = {name:var_dict[name] for name in run_state_names}
 
-avg_returns = []
-times = []
-for i in tqdm(range(config.num_steps//config.eval_frequency)):
-    # perform a number of iterations of agent environment interaction including learning updates
-    run_state = agent_environment_interaction_loop_function(run_state)
+    avg_returns = []
+    times = []
+    for i in tqdm(range(config.num_steps//config.eval_frequency)):
+        # perform a number of iterations of agent environment interaction including learning updates
+        run_state = agent_environment_interaction_loop_function(run_state)
 
-    # avg_return is debiased, and only includes batch elements wit at least one completed episode so that it is more meaningful in early episodes
-    valid_avg_returns = run_state["avg_return"][run_state["num_episodes"]>0]
-    valid_num_episodes = run_state["num_episodes"][run_state["num_episodes"]>0]
-    avg_return = jnp.mean(valid_avg_returns/(1-config.avg_return_smoothing**valid_num_episodes))
-    print("Running Average Return: "+str(avg_return))
-    avg_returns+=[avg_return]
+        # avg_return is debiased, and only includes batch elements wit at least one completed episode so that it is more meaningful in early episodes
+        valid_avg_returns = run_state["avg_return"][run_state["num_episodes"]>0]
+        valid_num_episodes = run_state["num_episodes"][run_state["num_episodes"]>0]
+        avg_return = jnp.mean(valid_avg_returns/(1-config.avg_return_smoothing**valid_num_episodes))
+        print("Running Average Return: "+str(avg_return))
+        avg_returns+=[avg_return]
 
-    time_step+=config.eval_frequency
-    times+=[time_step]
+        time_step+=config.eval_frequency
+        times+=[time_step]
 
-with open(args.output+".out", 'wb') as f:
-    pkl.dump({
-        'config': dict(config),
-        'avg_returns': avg_returns,
-        'times': times
-    }, f)
+    with open(args.output+".out", 'wb') as f:
+        pkl.dump({
+            'config': dict(config),
+            'avg_returns': avg_returns,
+            'times': times
+        }, f)
 
-with open(args.output+".params", 'wb') as f:
-    pkl.dump({
-        'V' : get_V_params(V_opt_state),
-        'pi' : get_pi_params(pi_opt_state)
-    }, f)
+    with open(args.output+".params", 'wb') as f:
+        pkl.dump({
+            'V' : get_V_params(V_opt_state),
+            'pi' : get_pi_params(pi_opt_state)
+        }, f)
